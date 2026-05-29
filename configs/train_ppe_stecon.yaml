@@ -1,0 +1,10 @@
+model:    models/ppeweight_uategat/yolo11n_uat.pt
+data:     data/dataset/ppe_stecon_training/ppe_stecon_training.yaml
+epochs:   1000
+imgsz:    720
+batch:    16
+freeze:   10
+lr0:      0.001
+patience: 100
+project:  runs/train
+name:     ppe-stecon

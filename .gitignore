@@ -14,13 +14,18 @@ env/
 .venv/
 
 # Model weights (large binary files — download separately)
-models/*.pt
-models/*.pth
-models/*.onnx
-models/*.engine
+models/**/*.pt
+models/**/*.pth
+models/**/*.onnx
+models/**/*.engine
 
 # Large input data
+data/dataset/
 data/videos/
+
+# YOLO cache and large archives
+*.cache
+*.zip
 
 # Output / run artifacts
 runs/

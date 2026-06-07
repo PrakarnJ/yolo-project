@@ -1,4 +1,4 @@
-model:    models/ppeweight_uategat/yolo11n_uat.pt
+model:    models/ppeweight_uategat/yolo11n_egat.pt
 data:     data/dataset/ppe_stecon_training/ppe_stecon_training.yaml
 epochs:   1000
 imgsz:    720

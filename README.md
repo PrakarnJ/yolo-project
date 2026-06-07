@@ -9,20 +9,24 @@ YOLO11-based PPE (Personal Protective Equipment) detection for industrial safety
 ## Project Structure
 
 ```
-arv-yolo-project/
+yolo-project/
 ├── configs/                              # experiment configs (one file per run)
 │   ├── train_ppe_stecon.yaml             # training hyperparams
-│   ├── val_ppe_stecon.yaml               # validation settings
-│   └── detect_ppe_stecon.yaml           # detection model + threshold
+│   ├── val_ppe_stecon.yaml               # single-model validation settings
+│   ├── detect_ppe_stecon.yaml            # detection model + threshold
+│   ├── compare_ppe_stecon.yaml           # multi-model validation comparison
+│   └── compare_detect_group2.yaml        # multi-model detection on image folder
 ├── scripts/
 │   ├── detect/
-│   │   ├── detect_image.py              # detect on a single image
-│   │   ├── detect_video.py              # detect on a video file
-│   │   └── detect_webcam.py             # live detection from webcam
+│   │   ├── image.py                     # detect on a single image
+│   │   ├── video.py                     # detect on a video file
+│   │   ├── webcam.py                    # live detection from webcam
+│   │   └── compare_detect.py            # compare models on an image folder
 │   ├── train/
-│   │   └── train_model.py               # fine-tune YOLO model
-│   └── val/
-│       └── val_model.py                 # evaluate model metrics
+│   │   └── model.py                     # fine-tune YOLO model
+│   └── validate/
+│       ├── model.py                     # evaluate single model metrics
+│       └── compare_val.py               # compare multiple models on a dataset
 ├── data/
 │   ├── dataset/
 │   │   ├── ppe_stecon_training/         # combined training dataset
@@ -30,14 +34,15 @@ arv-yolo-project/
 │   │   └── egat_uat_newest_crop_combined_2025_1_13/   # EGAT UAT images
 │   └── images/                          # sample images for quick tests
 ├── models/
-│   ├── yolov8n.pt                       # base YOLOv8 nano weight
-│   ├── yolo11n.pt                       # base YOLO11 nano weight
-│   └── ppeweight_uategat/
-│       └── yolo11n_uat.pt               # pretrained UAT weight (fine-tune starting point)
+│   ├── egat.pt                          # trained EGAT weight
+│   ├── stecon-1.pt                      # trained Stecon weight
+│   ├── ppeweight_uategat/
+│   │   └── yolo11n_uat.pt               # pretrained UAT weight (fine-tune starting point)
+│   └── raw_weight/                      # raw/base weights
 └── runs/                                # all outputs (auto-generated, git-ignored)
     ├── train/ppe-stecon/weights/best.pt
-    ├── val/ppe-stecon/
-    └── detect_image_output.jpg
+    ├── val/
+    └── detect/
 ```
 
 ---
@@ -61,7 +66,11 @@ models/ppeweight_uategat/yolo11n_uat.pt   ← pretrained on EGAT UAT data
         │
         └── fine-tune on ppe_stecon_training (1000 epochs)
                 │
-                └── runs/train/ppe-stecon/weights/best.pt   ← ppe-stecon model
+                ├── runs/train/ppe-stecon/weights/best.pt   ← best checkpoint
+                └── runs/train/ppe-stecon/weights/last.pt   ← final epoch
+
+models/egat.pt      ← trained EGAT weight
+models/stecon-1.pt  ← trained Stecon weight
 ```
 
 ---
@@ -69,6 +78,7 @@ models/ppeweight_uategat/yolo11n_uat.pt   ← pretrained on EGAT UAT data
 ## Setup
 
 ```bash
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -114,6 +124,37 @@ model: runs/train/ppe-stecon/weights/best.pt
 conf:  0.5
 ```
 
+**`configs/compare_ppe_stecon.yaml`** — multi-model validation (requires labeled dataset)
+```yaml
+dataset: data/dataset/ppe_stecon_training/ppe_stecon_training.yaml
+split:   val
+imgsz:   720
+batch:   16
+conf:    0.5
+iou:     0.5
+project: runs/val
+
+models:
+  - name:    ppe-egat
+    weights: models/egat.pt
+  - name:    ppe-stecon
+    weights: models/stecon-1.pt
+```
+
+**`configs/compare_detect_group2.yaml`** — multi-model detection on an image folder
+```yaml
+images:  data/images/group-2
+conf:    0.5
+imgsz:   720
+project: runs/detect
+
+models:
+  - name:    ppe-egat
+    weights: models/egat.pt
+  - name:    ppe-stecon
+    weights: models/stecon-1.pt
+```
+
 ---
 
 ## Usage
@@ -122,10 +163,10 @@ conf:  0.5
 
 ```bash
 # Train with config
-python scripts/train/train_model.py --config configs/train_ppe_stecon.yaml
+python scripts/train/model.py --config configs/train_ppe_stecon.yaml
 
 # Override specific params without editing the file
-python scripts/train/train_model.py --config configs/train_ppe_stecon.yaml --epochs 100 --batch 8 --lr0 0.0005
+python scripts/train/model.py --config configs/train_ppe_stecon.yaml --epochs 100 --batch 8 --lr0 0.0005
 ```
 
 Available overrides: `--model` `--data` `--epochs` `--imgsz` `--batch` `--freeze` `--lr0` `--patience` `--name`
@@ -133,37 +174,73 @@ Available overrides: `--model` `--data` `--epochs` `--imgsz` `--batch` `--freeze
 ### Validation
 
 ```bash
-# Validate on val split
-python scripts/val/val_model.py --config configs/val_ppe_stecon.yaml
+# Validate single model on val split
+python scripts/validate/model.py --config configs/val_ppe_stecon.yaml
 
 # Validate on test split
-python scripts/val/val_model.py --config configs/val_ppe_stecon.yaml --split test
+python scripts/validate/model.py --config configs/val_ppe_stecon.yaml --split test
 
 # Validate with a different model
-python scripts/val/val_model.py --config configs/val_ppe_stecon.yaml --model runs/train/my-run/weights/best.pt
+python scripts/validate/model.py --config configs/val_ppe_stecon.yaml --model runs/train/my-run/weights/best.pt
 ```
 
 Available overrides: `--model` `--data` `--split` `--imgsz` `--batch` `--conf` `--iou` `--name`
 
 Output metrics: mAP50, mAP50-95, Precision, Recall.
 
+### Compare Models — Validation (labeled dataset)
+
+Runs multiple weights against the same labeled dataset and prints a side-by-side accuracy table. Outputs CSV to `runs/val/comparison.csv`.
+
+```bash
+python scripts/validate/compare_val.py --config configs/compare_ppe_stecon.yaml
+
+# Save CSV to a custom path
+python scripts/validate/compare_val.py --config configs/compare_ppe_stecon.yaml --output results/my_comparison.csv
+```
+
+### Compare Models — Detection (image folder, no labels needed)
+
+Runs multiple weights on every image in a folder and summarizes detections per class (count, avg confidence, images detected in). Saves annotated images per model to `runs/detect/<model-name>/`.
+
+```bash
+python scripts/detect/compare_detect.py --config configs/compare_detect_group2.yaml
+```
+
 ### Detection
 
 ```bash
 # Image — using config
-python scripts/detect/detect_image.py data/images/safety1.jpg --config configs/detect_ppe_stecon.yaml
+python scripts/detect/image.py data/images/safety1.jpg --config configs/detect_ppe_stecon.yaml
 
 # Image — direct model path (no config needed)
-python scripts/detect/detect_image.py data/images/safety1.jpg --model runs/train/ppe-stecon/weights/best.pt
+python scripts/detect/image.py data/images/safety1.jpg --model runs/train/ppe-stecon/weights/best.pt
+
+# Lower confidence threshold
+python scripts/detect/image.py data/images/safety1.jpg --config configs/detect_ppe_stecon.yaml --conf 0.25
 
 # Video
-python scripts/detect/detect_video.py data/videos/your_video.mp4 --config configs/detect_ppe_stecon.yaml
+python scripts/detect/video.py data/videos/your_video.mp4 --config configs/detect_ppe_stecon.yaml
 
 # Webcam (press Q to quit)
-python scripts/detect/detect_webcam.py --config configs/detect_ppe_stecon.yaml
+python scripts/detect/webcam.py --config configs/detect_ppe_stecon.yaml
 ```
 
 Available overrides: `--model` `--conf`
+
+---
+
+## Script vs Config Quick Reference
+
+| Goal | Script | Config |
+|------|--------|--------|
+| Train a model | `scripts/train/model.py` | `configs/train_ppe_stecon.yaml` |
+| Validate single model (mAP) | `scripts/validate/model.py` | `configs/val_ppe_stecon.yaml` |
+| Compare models on labeled dataset | `scripts/validate/compare_val.py` | `configs/compare_ppe_stecon.yaml` |
+| Compare models on image folder | `scripts/detect/compare_detect.py` | `configs/compare_detect_group2.yaml` |
+| Detect on single image | `scripts/detect/image.py` | `configs/detect_ppe_stecon.yaml` |
+| Detect on video | `scripts/detect/video.py` | `configs/detect_ppe_stecon.yaml` |
+| Live webcam detection | `scripts/detect/webcam.py` | `configs/detect_ppe_stecon.yaml` |
 
 ---
 
@@ -176,8 +253,8 @@ Available overrides: `--model` `--conf`
    ```
 2. Run:
    ```bash
-   python scripts/train/train_model.py --config configs/train_my_experiment.yaml
-   python scripts/val/val_model.py     --config configs/val_my_experiment.yaml
+   python scripts/train/model.py --config configs/train_my_experiment.yaml
+   python scripts/validate/model.py --config configs/val_my_experiment.yaml
    ```
 
 No script files need to be edited — only the config.

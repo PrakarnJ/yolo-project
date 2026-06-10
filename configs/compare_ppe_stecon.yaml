@@ -1,4 +1,4 @@
-dataset: data/dataset/ppe_stecon_training/ppe_stecon_training.yaml
+dataset: data/dataset/ppe_stecon_training_v1/ppe_stecon_training_v1.yaml
 split: val
 imgsz: 720
 batch: 16
@@ -7,7 +7,7 @@ iou: 0.5
 project: runs/val
 
 models:
-  - name: ppe-egat
-    weights: models/egat.pt
-  - name: ppe-stecon
+  - name: ppe-stecon-0
+    weights: models/stecon-0.pt
+  - name: ppe-stecon-1
     weights: models/stecon-1.pt

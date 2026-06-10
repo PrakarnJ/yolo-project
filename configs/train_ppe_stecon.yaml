@@ -1,10 +1,33 @@
-model:    models/ppeweight_uategat/yolo11n_egat.pt
-data:     data/dataset/ppe_stecon_training/ppe_stecon_training.yaml
-epochs:   1000
-imgsz:    720
-batch:    16
-freeze:   10
-lr0:      0.001
-patience: 100
-project:  runs/train
-name:     ppe-stecon
+model: models/raw_weight/yolo11n.pt
+data: data/dataset/ppe_stecon_training_v1/ppe_stecon_training_v1.yaml
+epochs: 300
+imgsz: 720
+batch: 16
+freeze: 10
+lr0: 0.001
+patience: 20
+project: runs/train
+name: ppe-stecon-1
+# Regularization
+weight_decay: 0.0005 # ป้องกัน overfit
+dropout: 0.1 # เพิ่ม generalization
+
+# Learning Rate Schedule
+lrf: 0.01 # lr ตอนท้าย = lr0 × lrf
+
+# Augmentation — สำคัญมากสำหรับ 500 ภาพ
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4 # เปลี่ยนแสง — แก้ overfit สถานที่
+fliplr: 0.5
+mosaic: 1.0
+translate: 0.1
+scale: 0.5
+
+# Validation & Saving
+val: true
+save_period: 10 # save checkpoint ทุก 10 epoch
+plots: true # ดู loss curve, confusion matrix
+
+# Early Stopping
+close_mosaic: 10 # ปิด mosaic ใน 10 epoch สุดท้าย

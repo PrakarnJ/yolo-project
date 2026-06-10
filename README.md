@@ -92,6 +92,7 @@ Requirements: Python 3.8+, CUDA-capable GPU.
 All scripts are driven by config YAMLs. CLI flags override any config value.
 
 **`configs/train_ppe_stecon.yaml`**
+
 ```yaml
 model:    models/ppeweight_uategat/yolo11n_uat.pt
 data:     data/dataset/ppe_stecon_training/ppe_stecon_training.yaml
@@ -106,6 +107,7 @@ name:     ppe-stecon
 ```
 
 **`configs/val_ppe_stecon.yaml`**
+
 ```yaml
 model:   runs/train/ppe-stecon/weights/best.pt
 data:    data/dataset/ppe_stecon_training/ppe_stecon_training.yaml
@@ -119,12 +121,14 @@ name:    ppe-stecon
 ```
 
 **`configs/detect_ppe_stecon.yaml`**
+
 ```yaml
 model: runs/train/ppe-stecon/weights/best.pt
 conf:  0.5
 ```
 
 **`configs/compare_ppe_stecon.yaml`** — multi-model validation (requires labeled dataset)
+
 ```yaml
 dataset: data/dataset/ppe_stecon_training/ppe_stecon_training.yaml
 split:   val
@@ -142,6 +146,7 @@ models:
 ```
 
 **`configs/compare_detect_group2.yaml`** — multi-model detection on an image folder
+
 ```yaml
 images:  data/images/group-2
 conf:    0.5
@@ -204,7 +209,7 @@ python scripts/validate/compare_val.py --config configs/compare_ppe_stecon.yaml 
 Runs multiple weights on every image in a folder and summarizes detections per class (count, avg confidence, images detected in). Saves annotated images per model to `runs/detect/<model-name>/`.
 
 ```bash
-python scripts/detect/compare_detect.py --config configs/compare_detect_group2.yaml
+python scripts/detect/compare_detect.py --config configs/compare_detect_group.yaml
 ```
 
 ### Detection
@@ -247,11 +252,14 @@ Available overrides: `--model` `--conf`
 ## Adding a New Experiment
 
 1. Copy the relevant config and edit it:
+
    ```bash
    cp configs/train_ppe_stecon.yaml configs/train_my_experiment.yaml
    # update model, data, name, and hyperparams
    ```
+
 2. Run:
+
    ```bash
    python scripts/train/model.py --config configs/train_my_experiment.yaml
    python scripts/validate/model.py --config configs/val_my_experiment.yaml

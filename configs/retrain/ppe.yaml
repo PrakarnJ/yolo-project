@@ -16,7 +16,17 @@ classes:
 datasets_dir: datasets/ppe_stecon        # drop YOLO batch folders here
 workspace_dir: workspace      # auto-generated — do not edit by hand
 
-# Training hyperparameters
+# RF-DETR training (runs after YOLO on the same GPU, same run folder)
+rfdetr_train:
+  enabled: true
+  model: base          # base or large
+  epochs: 50
+  batch_size: 4
+  grad_accum_steps: 4
+  lr: 0.0001
+  resolution: 560
+
+# YOLO training hyperparameters
 train:
   base_model: models/raw_weight/yolo11n.pt
   epochs: 300

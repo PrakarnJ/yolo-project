@@ -1,7 +1,7 @@
 # PPE Detection — Iterative Retraining Pipeline
 
-YOLO11-based PPE (Personal Protective Equipment) detection for industrial safety monitoring (EGAT/Stecon).  
-The pipeline is designed for continuous improvement: drop a new labeled batch, run one command, and always know which model is best.
+YOLO11 + RF-DETR PPE (Personal Protective Equipment) detection for industrial safety monitoring (EGAT/Stecon).  
+The pipeline is designed for continuous improvement: drop a new labeled batch, run one command, and always know which model is best — across both frameworks.
 
 **11 detection classes:** `helmet` · `longsleeve` · `shortsleeve` · `coverall` · `longpant` · `shortpant` · `skirt` · `vest` · `glove` · `boot` · `shoe`
 
@@ -17,11 +17,13 @@ yolo-project/
 ├── scripts/
 │   └── retrain.py                # main pipeline script
 ├── datasets/                     # INPUT: drop labeled batch folders here (git-ignored)
-│   └── egat_uat/                 # first batch — 800 train / 200 val
+│   └── ppe_stecon/
+│       └── egat_uat/             # first batch — 800 train / 200 val
 ├── workspace/                    # AUTO-GENERATED outputs (git-ignored)
-│   ├── merged/                   # combined dataset built from all batches (symlinks)
+│   ├── merged/                   # YOLO dataset built from all batches (symlinks)
+│   ├── merged_coco/              # COCO format conversion for RF-DETR
 │   ├── runs/                     # one folder per training run
-│   ├── leaderboard.csv           # accuracy history across all runs
+│   ├── leaderboard.csv           # accuracy history — YOLO and RF-DETR ranked together
 │   └── detection_history.csv     # detection stats per run
 ├── data/
 │   └── images/                   # unlabeled test images for detection comparison
@@ -96,13 +98,16 @@ names:
 ### 2 — Run the pipeline
 
 ```bash
-# Standard run: merge all batches → train → evaluate all models → update leaderboard
+# Standard run: merge → train YOLO + RF-DETR → evaluate all models → update leaderboard
 .venv/bin/python scripts/retrain.py --config configs/retrain/ppe.yaml
 
 # Re-evaluate all existing models without training a new one
 .venv/bin/python scripts/retrain.py --config configs/retrain/ppe.yaml --eval-only
 
-# Override epochs without editing the config
+# Skip RF-DETR training (YOLO only)
+.venv/bin/python scripts/retrain.py --config configs/retrain/ppe.yaml --skip-rfdetr
+
+# Override YOLO epochs without editing the config
 .venv/bin/python scripts/retrain.py --config configs/retrain/ppe.yaml --epochs 100
 ```
 
@@ -112,19 +117,23 @@ At the end of each run the script prints a ranked table:
 
 ```
 --- VALIDATION (labeled val set) ---
-Rank  Run                                   Batches        mAP50     mAP50-95    Prec      Recall
- 1    ★ run_002_... [NEW]                   egat_uat,...   0.8710*   0.6450*     0.8920*   0.7810*
- 2      run_001_...                         egat_uat       0.8230    0.6120      0.8510    0.7420
+Rank  Run                         Frm     Batches     mAP50   mAP50-95   Prec    Recall
+ 1    ★ run_002_... [NEW]         rfdetr  egat_uat,…  0.941*   0.661*     N/A      N/A
+ 2      run_002_... [NEW]         yolo    egat_uat,…  0.879    0.637    0.912*   0.801*
+ 3      run_001_...               rfdetr  egat_uat    0.936    0.655     N/A      N/A
+ 4      run_001_...               yolo    egat_uat    0.857    0.604    0.916    0.778
 
 --- DETECTION (image folder: data/images/group-3) ---
-Rank  Run                                   Total Det    Imgs w/ Det  Top Class
- 1    ★ run_002_... [NEW]                        342*         58/64   helmet(120)
- 2      run_001_...                              289          52/64   helmet(98)
+Rank  Run                         Frm     Total Det  Imgs w/ Det  Top Class
+ 1    ★ run_002_... [NEW]         rfdetr       342*       58/64   helmet(120)
+ 2      run_002_... [NEW]         yolo          45        18/32   helmet(20)
+ 3      run_001_...               rfdetr        28        16/32   helmet(13)
+ 4      run_001_...               yolo           2         2/32   boot(2)
 
-Best model: workspace/runs/run_002_.../weights/best.pt
+Best model: RFDETR  workspace/runs/run_002_.../rfdetr/checkpoint_best_total.pth
 ```
 
-`★` = this run · `*` = best value across all runs
+`★` = overall best · `*` = best value in column · `Frm` = framework
 
 ---
 
@@ -137,8 +146,17 @@ classes:              # must match dataset.yaml in every batch
   - helmet
   - ...
 
-datasets_dir: datasets        # where you drop batch folders
-workspace_dir: workspace      # all generated outputs land here
+datasets_dir: datasets/ppe_stecon   # where you drop batch folders
+workspace_dir: workspace            # all generated outputs land here
+
+rfdetr_train:
+  enabled: true        # set false (or --skip-rfdetr) to disable
+  model: base          # base | large | small | medium | nano
+  epochs: 50
+  batch_size: 4
+  grad_accum_steps: 4
+  lr: 0.0001
+  resolution: 560
 
 train:
   base_model: models/raw_weight/yolo11n.pt
@@ -173,14 +191,19 @@ workspace/
 │   ├── val/images/
 │   ├── val/labels/
 │   └── merged.yaml
+├── merged_coco/         ← COCO format for RF-DETR (auto-generated from merged/)
+│   ├── train/  (_annotations.coco.json + image symlinks)
+│   └── valid/  (_annotations.coco.json + image symlinks)
 ├── runs/
 │   └── run_001_20260611_180000/
 │       ├── weights/
-│       │   ├── best.pt       ← use this for deployment
+│       │   ├── best.pt                    ← YOLO weights
 │       │   └── last.pt
-│       ├── run_meta.yaml     ← batches used, image counts, timestamp
-│       └── detect/           ← annotated images from the test folder
-├── leaderboard.csv           ← one row per run, sorted by mAP50
+│       ├── rfdetr/
+│       │   └── checkpoint_best_total.pth  ← RF-DETR weights
+│       ├── run_meta.yaml                  ← batches used, image counts, timestamp
+│       └── detect/                        ← annotated images from the test folder
+├── leaderboard.csv           ← one row per (run, framework), ranked by mAP50
 └── detection_history.csv     ← detection totals per run
 ```
 

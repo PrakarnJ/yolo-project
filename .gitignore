@@ -27,6 +27,15 @@ models/**/*.engine
 datasets/
 workspace/
 
+# YOLO/MLflow run outputs at project root (auto-generated)
+runs/
+
+# Stray weight files dropped at project root
+*.pt
+*.pth
+*.onnx
+*.engine
+
 # Old pipeline — staging folder, not part of active project
 old_pipeline/
 

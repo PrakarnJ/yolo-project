@@ -1,2 +1,0 @@
-model: runs/train/ppe-stecon/weights/best.pt
-conf:  0.5

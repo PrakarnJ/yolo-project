@@ -1,0 +1,9 @@
+artifact_location: /home/prakarnj/vibe_code_ws/src/yolo-project/runs/mlflow/0
+creation_time: 1781190444939
+effective_trace_archival_retention: null
+experiment_id: '0'
+last_update_time: 1781190444939
+lifecycle_stage: active
+name: Default
+trace_location: null
+workspace: default

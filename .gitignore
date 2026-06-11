@@ -19,16 +19,16 @@ models/**/*.pth
 models/**/*.onnx
 models/**/*.engine
 
-# Large input data
-data/dataset/
-data/videos/
-
 # YOLO cache and large archives
 *.cache
 *.zip
 
-# Output / run artifacts
-runs/
+# Retrain pipeline I/O (auto-generated or user-dropped data)
+datasets/
+workspace/
+
+# Old pipeline — staging folder, not part of active project
+old_pipeline/
 
 # Jupyter
 .ipynb_checkpoints/

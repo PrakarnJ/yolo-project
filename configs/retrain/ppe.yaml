@@ -1,0 +1,40 @@
+# Class names — must match across ALL batch dataset.yaml files (same order)
+classes:
+  - helmet
+  - longsleeve
+  - shortsleeve
+  - coverall
+  - longpant
+  - shortpant
+  - skirt
+  - vest
+  - glove
+  - boot
+  - shoe
+
+# Paths (relative to project root)
+datasets_dir: datasets/ppe_stecon        # drop YOLO batch folders here
+workspace_dir: workspace      # auto-generated — do not edit by hand
+
+# Training hyperparameters
+train:
+  base_model: models/raw_weight/yolo11n.pt
+  epochs: 300
+  imgsz: 720
+  batch: 16
+  freeze: 10
+  lr0: 0.001
+  patience: 20
+
+# Validation settings (applied to ALL models on each retrain)
+validate:
+  conf: 0.5
+  iou: 0.5
+  imgsz: 720
+  batch: 16
+
+# Detection test on unlabeled image folder (same folder every run — fair comparison)
+detect:
+  images: data/images/group-3
+  conf: 0.5
+  imgsz: 720

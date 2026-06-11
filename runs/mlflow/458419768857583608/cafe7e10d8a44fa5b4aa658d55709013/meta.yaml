@@ -1,0 +1,14 @@
+artifact_uri: /home/prakarnj/vibe_code_ws/src/yolo-project/runs/mlflow/458419768857583608/cafe7e10d8a44fa5b4aa658d55709013/artifacts
+end_time: 1781190854519
+entry_point_name: ''
+experiment_id: '458419768857583608'
+lifecycle_stage: active
+run_id: cafe7e10d8a44fa5b4aa658d55709013
+run_name: run_001_20260611_220802
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1781190487580
+status: 3
+tags: []
+user_id: prakarnj

@@ -1,20 +1,11 @@
 # Class names — must match across ALL batch dataset.yaml files (same order)
 classes:
-  - helmet
-  - longsleeve
-  - shortsleeve
-  - coverall
-  - longpant
-  - shortpant
-  - skirt
-  - vest
-  - glove
-  - boot
-  - shoe
+  - fight
+  - fall
 
 # Paths (relative to project root)
-datasets_dir: datasets/ppe_stecon        # drop YOLO batch folders here
-workspace_dir: workspace_ppe      # auto-generated — do not edit by hand
+datasets_dir: datasets/physical_fight        # drop YOLO batch folders here
+workspace_dir: workspace_fight      # auto-generated — do not edit by hand
 
 # RF-DETR training (runs after YOLO on the same GPU, same run folder)
 rfdetr_train:

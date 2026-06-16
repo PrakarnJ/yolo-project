@@ -4,13 +4,14 @@ Iterative retraining pipeline — YOLO + RF-DETR.
 Workflow:
   1.  Scan datasets/        — find batch folders, verify class consistency
   2.  Merge (YOLO)          — symlink all batches into workspace/merged/
-  2b. Convert to COCO       — workspace/merged_coco/ for RF-DETR
+                             (val images split: 90% val / 10% test via manifest)
+  2b. Convert to COCO       — workspace/merged_coco/ for RF-DETR (train + valid + test)
   3.  Train YOLO            — new run_NNN_... in workspace/runs/
   3b. Train RF-DETR         — saved under run_dir/rfdetr/
   4.  Evaluate ALL models   — YOLO (.pt) + RF-DETR (.pth) on current val set
   5.  Update leaderboard    — workspace/leaderboard.csv (with framework column)
-  6.  Detect                — all models on test image folder
-  7.  Summary               — ranked table across both frameworks
+  6.  Blind test            — all models on held-out test split; cleanup test dirs
+  7.  Summary               — val + blind test ranked tables across both frameworks
 
 Usage:
   .venv/bin/python scripts/retrain.py --config configs/retrain/ppe.yaml
@@ -23,11 +24,11 @@ import argparse
 import csv
 import json
 import os
+import shutil
 
 # Allow ultralytics MLflow callback to use local file store without migration error
 os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
 
-from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -80,9 +81,23 @@ def scan_batches(datasets_dir: Path, expected_classes: list) -> list:
 
 # ─── Phase 2: Merge YOLO dataset using symlinks ──────────────────
 
+def _load_manifest(workspace_dir: Path) -> dict:
+    manifest_path = workspace_dir / "test_split_manifest.json"
+    if manifest_path.exists():
+        with open(manifest_path) as f:
+            return json.load(f)
+    return {}
+
+
+def _save_manifest(workspace_dir: Path, manifest: dict):
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    with open(workspace_dir / "test_split_manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+
+
 def merge_dataset(batches: list, workspace_dir: Path, expected_classes: list):
     merged_dir = workspace_dir / "merged"
-    for split in ("train", "val"):
+    for split in ("train", "val", "test"):
         for sub in ("images", "labels"):
             d = merged_dir / split / sub
             d.mkdir(parents=True, exist_ok=True)
@@ -90,40 +105,76 @@ def merge_dataset(batches: list, workspace_dir: Path, expected_classes: list):
                 if f.is_symlink():
                     f.unlink()
 
-    train_count = val_count = 0
+    manifest = _load_manifest(workspace_dir)
+    manifest_updated = False
+    train_count = val_count = test_count = 0
+
     for batch_dir in batches:
         prefix = batch_dir.name + "__"
-        for split in ("train", "val"):
-            img_src = batch_dir / split / "images"
-            lbl_src = batch_dir / split / "labels"
-            if not img_src.exists():
-                continue
+
+        # ── Train split ───────────────────────────────────────────
+        img_src = batch_dir / "train" / "images"
+        lbl_src = batch_dir / "train" / "labels"
+        if img_src.exists():
             for img_path in sorted(img_src.iterdir()):
                 if img_path.suffix.lower() not in SUPPORTED_IMG:
                     continue
-                dst_img = merged_dir / split / "images" / (prefix + img_path.name)
-                dst_lbl = merged_dir / split / "labels" / (prefix + img_path.stem + ".txt")
+                dst_img = merged_dir / "train" / "images" / (prefix + img_path.name)
+                dst_lbl = merged_dir / "train" / "labels" / (prefix + img_path.stem + ".txt")
                 src_lbl = lbl_src / (img_path.stem + ".txt")
                 if not dst_img.exists():
                     os.symlink(img_path.resolve(), dst_img)
                 if src_lbl.exists() and not dst_lbl.exists():
                     os.symlink(src_lbl.resolve(), dst_lbl)
-                if split == "train":
-                    train_count += 1
-                else:
-                    val_count += 1
+                train_count += 1
+
+        # ── Val/test split — carve 10% of val into test via manifest ─
+        val_img_src = batch_dir / "val" / "images"
+        val_lbl_src = batch_dir / "val" / "labels"
+        if not val_img_src.exists():
+            continue
+
+        all_val_imgs = sorted(
+            p for p in val_img_src.iterdir() if p.suffix.lower() in SUPPORTED_IMG
+        )
+
+        if batch_dir.name not in manifest:
+            # First time: take every 10th image as test (deterministic, no seed needed)
+            test_names = set(p.name for p in all_val_imgs[::10])
+            manifest[batch_dir.name] = sorted(test_names)
+            manifest_updated = True
+        else:
+            test_names = set(manifest[batch_dir.name])
+
+        for img_path in all_val_imgs:
+            dest_split = "test" if img_path.name in test_names else "val"
+            dst_img = merged_dir / dest_split / "images" / (prefix + img_path.name)
+            dst_lbl = merged_dir / dest_split / "labels" / (prefix + img_path.stem + ".txt")
+            src_lbl = val_lbl_src / (img_path.stem + ".txt")
+            if not dst_img.exists():
+                os.symlink(img_path.resolve(), dst_img)
+            if src_lbl.exists() and not dst_lbl.exists():
+                os.symlink(src_lbl.resolve(), dst_lbl)
+            if dest_split == "test":
+                test_count += 1
+            else:
+                val_count += 1
+
+    if manifest_updated:
+        _save_manifest(workspace_dir, manifest)
 
     merged_yaml = {
-        "path": str(merged_dir.resolve()),
+        "path":  str(merged_dir.resolve()),
         "train": "train/images",
-        "val": "val/images",
-        "nc": len(expected_classes),
+        "val":   "val/images",
+        "test":  "test/images",
+        "nc":    len(expected_classes),
         "names": expected_classes,
     }
     with open(merged_dir / "merged.yaml", "w") as f:
         yaml.dump(merged_yaml, f, default_flow_style=False)
 
-    return merged_dir, train_count, val_count
+    return merged_dir, train_count, val_count, test_count
 
 
 # ─── Phase 2b: Convert merged YOLO → COCO (for RF-DETR) ──────────
@@ -133,18 +184,28 @@ def phase_convert_coco(merged_dir: Path, workspace_dir: Path, expected_classes: 
 
     coco_dir = workspace_dir / "merged_coco"
 
-    # Skip if already up to date (val image count matches)
+    # Skip if already up to date (check val and test image counts against existing JSONs)
     val_img_count = sum(
         1 for p in (merged_dir / "val" / "images").iterdir()
         if p.suffix.lower() in SUPPORTED_IMG
     )
+    test_img_dir = merged_dir / "test" / "images"
+    test_img_count = sum(
+        1 for p in test_img_dir.iterdir() if p.suffix.lower() in SUPPORTED_IMG
+    ) if test_img_dir.exists() else 0
+
     valid_ann = coco_dir / "valid" / "_annotations.coco.json"
-    if valid_ann.exists():
+    test_ann  = coco_dir / "test"  / "_annotations.coco.json"
+    if valid_ann.exists() and test_ann.exists():
         try:
             with open(valid_ann) as f:
-                existing = json.load(f)
-            if len(existing.get("images", [])) == val_img_count:
-                print(f"  COCO dataset up to date ({val_img_count} val images) — skipping conversion.")
+                existing_val = json.load(f)
+            with open(test_ann) as f:
+                existing_test = json.load(f)
+            if (len(existing_val.get("images", [])) == val_img_count and
+                    len(existing_test.get("images", [])) == test_img_count):
+                print(f"  COCO dataset up to date "
+                      f"({val_img_count} val, {test_img_count} test images) — skipping conversion.")
                 return coco_dir
         except Exception:
             pass
@@ -154,10 +215,12 @@ def phase_convert_coco(merged_dir: Path, workspace_dir: Path, expected_classes: 
         for i, name in enumerate(expected_classes)
     ]
 
-    for src_split, dst_split in [("train", "train"), ("val", "valid")]:
-        img_src = merged_dir / src_split / "images"
-        lbl_src = merged_dir / src_split / "labels"
-        dst_dir  = coco_dir / dst_split
+    for src_split, dst_split in [("train", "train"), ("val", "valid"), ("test", "test")]:
+        src_img_dir = merged_dir / src_split / "images"
+        if not src_img_dir.exists():
+            continue
+        src_lbl_dir = merged_dir / src_split / "labels"
+        dst_dir = coco_dir / dst_split
         dst_dir.mkdir(parents=True, exist_ok=True)
 
         # Clean existing symlinks
@@ -168,7 +231,7 @@ def phase_convert_coco(merged_dir: Path, workspace_dir: Path, expected_classes: 
         coco: dict = {"images": [], "annotations": [], "categories": categories}
         ann_id = 1
 
-        for img_id, img_path in enumerate(sorted(img_src.iterdir()), 1):
+        for img_id, img_path in enumerate(sorted(src_img_dir.iterdir()), 1):
             if img_path.suffix.lower() not in SUPPORTED_IMG:
                 continue
 
@@ -183,7 +246,7 @@ def phase_convert_coco(merged_dir: Path, workspace_dir: Path, expected_classes: 
             if not dst_link.exists():
                 os.symlink(img_path.resolve(), dst_link)
 
-            lbl_path = lbl_src / (img_path.stem + ".txt")
+            lbl_path = src_lbl_dir / (img_path.stem + ".txt")
             if lbl_path.exists():
                 with open(lbl_path) as f:
                     for line in f:
@@ -233,7 +296,8 @@ def _next_run_number(runs_dir: Path) -> int:
 
 
 def phase_train_yolo(train_cfg: dict, merged_dir: Path, batches: list,
-                     train_count: int, val_count: int, runs_dir: Path) -> tuple:
+                     train_count: int, val_count: int, test_count: int,
+                     runs_dir: Path) -> tuple:
     from ultralytics import YOLO
 
     run_num   = _next_run_number(runs_dir)
@@ -263,6 +327,7 @@ def phase_train_yolo(train_cfg: dict, merged_dir: Path, batches: list,
         "batches":      [b.name for b in batches],
         "train_images": train_count,
         "val_images":   val_count,
+        "test_images":  test_count,
     }
     with open(run_dir / "run_meta.yaml", "w") as f:
         yaml.dump(meta, f)
@@ -313,17 +378,19 @@ def _load_meta(run_dir: Path) -> dict:
     return {}
 
 
-def _eval_yolo(run_dir: Path, merged_dir: Path, val_cfg: dict) -> dict | None:
+def _eval_yolo(run_dir: Path, merged_dir: Path, val_cfg: dict,
+               split: str = "val") -> dict | None:
     from ultralytics import YOLO
 
     weights = run_dir / "weights" / "best.pt"
     if not weights.exists():
         return None
 
-    meta    = _load_meta(run_dir)
-    metrics = YOLO(str(weights)).val(
+    meta      = _load_meta(run_dir)
+    eval_name = "eval_yolo" if split == "val" else f"eval_yolo_{split}"
+    metrics   = YOLO(str(weights)).val(
         data=str(merged_dir / "merged.yaml"),
-        split="val",
+        split=split,
         imgsz=val_cfg.get("imgsz", 640),
         batch=val_cfg.get("batch", 16),
         device=0,
@@ -332,7 +399,7 @@ def _eval_yolo(run_dir: Path, merged_dir: Path, val_cfg: dict) -> dict | None:
         plots=False,
         save_json=False,
         project=str(run_dir),
-        name="eval_yolo",
+        name=eval_name,
         verbose=False,
     )
     return {
@@ -342,6 +409,7 @@ def _eval_yolo(run_dir: Path, merged_dir: Path, val_cfg: dict) -> dict | None:
         "batches":      ",".join(meta.get("batches", [])),
         "train_images": meta.get("train_images", ""),
         "val_images":   meta.get("val_images", ""),
+        "test_images":  meta.get("test_images", ""),
         "mAP50":        round(float(metrics.box.map50), 4),
         "mAP50-95":     round(float(metrics.box.map),   4),
         "Precision":    round(float(metrics.box.mp),    4),
@@ -351,7 +419,8 @@ def _eval_yolo(run_dir: Path, merged_dir: Path, val_cfg: dict) -> dict | None:
     }
 
 
-def _eval_rfdetr(run_dir: Path, merged_coco_dir: Path) -> dict | None:
+def _eval_rfdetr(run_dir: Path, merged_coco_dir: Path,
+                 coco_split: str = "valid") -> dict | None:
     import warnings
     warnings.filterwarnings("ignore", category=FutureWarning, module="rfdetr")
     from rfdetr import RFDETR
@@ -362,7 +431,7 @@ def _eval_rfdetr(run_dir: Path, merged_coco_dir: Path) -> dict | None:
     if not weights.exists():
         return None
 
-    val_dir  = merged_coco_dir / "valid"
+    val_dir  = merged_coco_dir / coco_split
     ann_file = val_dir / "_annotations.coco.json"
     if not ann_file.exists():
         return None
@@ -404,6 +473,7 @@ def _eval_rfdetr(run_dir: Path, merged_coco_dir: Path) -> dict | None:
         "batches":      ",".join(meta.get("batches", [])),
         "train_images": meta.get("train_images", ""),
         "val_images":   meta.get("val_images", ""),
+        "test_images":  meta.get("test_images", ""),
         "mAP50":        round(map50,   4),
         "mAP50-95":     round(map5095, 4),
         "Precision":    "N/A",
@@ -441,60 +511,61 @@ def phase_evaluate_all(runs_dir: Path, merged_dir: Path,
 
 # ─── Phase 5: Update leaderboard ─────────────────────────────────
 
+def _mark_best(results: list) -> list:
+    if results:
+        best = max(
+            (r for r in results if isinstance(r.get("mAP50"), float)),
+            key=lambda r: r["mAP50"],
+            default=None,
+        )
+        for r in results:
+            r["is_best"] = bool(
+                best and r["run"] == best["run"] and r["framework"] == best["framework"]
+            )
+    return results
+
+
 def update_leaderboard(workspace_dir: Path, eval_results: list) -> list:
-    lb_path = workspace_dir / "leaderboard.csv"
     headers = [
         "run", "framework", "timestamp", "batches", "train_images", "val_images",
         "mAP50", "mAP50-95", "Precision", "Recall", "weights", "is_best",
     ]
-    if eval_results:
-        best = max(
-            (r for r in eval_results if isinstance(r.get("mAP50"), float)),
-            key=lambda r: r["mAP50"],
-            default=None,
-        )
-        for r in eval_results:
-            r["is_best"] = bool(
-                best and r["run"] == best["run"] and r["framework"] == best["framework"]
-            )
-    _save_csv(eval_results, lb_path, headers)
+    eval_results = _mark_best(eval_results)
+    _save_csv(eval_results, workspace_dir / "leaderboard.csv", headers)
     return eval_results
 
 
-# ─── Phase 6: Detect on image folder (YOLO + RF-DETR) ────────────
+def update_blind_test_leaderboard(workspace_dir: Path, blind_test_results: list) -> list:
+    headers = [
+        "run", "framework", "timestamp", "batches", "train_images", "val_images", "test_images",
+        "mAP50", "mAP50-95", "Precision", "Recall", "weights", "is_best",
+    ]
+    blind_test_results = _mark_best(blind_test_results)
+    _save_csv(blind_test_results, workspace_dir / "blind_test_leaderboard.csv", headers)
+    return blind_test_results
 
-def _detect_yolo(run_dir: Path, images: list, detect_cfg: dict) -> dict | None:
+
+# ─── Phase 6: Blind test on held-out test split ───────────────────
+
+def _detect_test_yolo(run_dir: Path, test_imgs: list, val_cfg: dict):
     from ultralytics import YOLO
-
     weights = run_dir / "weights" / "best.pt"
     if not weights.exists():
-        return None
-
-    conf    = detect_cfg.get("conf", 0.5)
-    imgsz   = detect_cfg.get("imgsz", 640)
-    out_dir = run_dir / "detect_yolo"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    model       = YOLO(str(weights))
-    class_stats = defaultdict(lambda: {"count": 0, "conf_sum": 0.0, "img_names": set()})
-    total_det   = 0
-
-    for img_path in images:
+        return
+    out_dir = run_dir / "detect_test_yolo"
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+    model = YOLO(str(weights))
+    conf  = val_cfg.get("conf", 0.5)
+    imgsz = val_cfg.get("imgsz", 640)
+    for img_path in test_imgs:
         result = model(str(img_path), conf=conf, imgsz=imgsz, verbose=False)[0]
-        for box in result.boxes:
-            cls_name = model.names[int(box.cls)]
-            cs = float(box.conf)
-            class_stats[cls_name]["count"]   += 1
-            class_stats[cls_name]["conf_sum"] += cs
-            class_stats[cls_name]["img_names"].add(img_path.name)
-            total_det += 1
         result.save(str(out_dir / img_path.name))
+    print(f"    → detect_test_yolo/ ({len(test_imgs)} images)")
 
-    return _build_det_result(run_dir, "yolo", images, class_stats, total_det, out_dir)
 
-
-def _detect_rfdetr(run_dir: Path, images: list, detect_cfg: dict,
-                   class_names: list) -> dict | None:
+def _detect_test_rfdetr(run_dir: Path, test_imgs: list, val_cfg: dict, class_names: list):
     import warnings
     import cv2
     import numpy as np
@@ -504,32 +575,20 @@ def _detect_rfdetr(run_dir: Path, images: list, detect_cfg: dict,
 
     weights = run_dir / "rfdetr" / "checkpoint_best_total.pth"
     if not weights.exists():
-        return None
-
-    conf    = detect_cfg.get("conf", 0.5)
-    out_dir = run_dir / "detect_rfdetr"
-    out_dir.mkdir(parents=True, exist_ok=True)
+        return
+    out_dir = run_dir / "detect_test_rfdetr"
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
 
     model           = RFDETR.from_checkpoint(str(weights))
     box_annotator   = sv.BoxAnnotator()
     label_annotator = sv.LabelAnnotator()
-    class_stats     = defaultdict(lambda: {"count": 0, "conf_sum": 0.0, "img_names": set()})
-    total_det       = 0
+    conf            = val_cfg.get("conf", 0.5)
 
-    for img_path in images:
+    for img_path in test_imgs:
         dets = model.predict(str(img_path), threshold=conf)
-
-        if dets is not None and len(dets) > 0:
-            for i in range(len(dets.xyxy)):
-                cls_id   = int(dets.class_id[i])
-                cls_name = class_names[cls_id] if cls_id < len(class_names) else str(cls_id)
-                cs       = float(dets.confidence[i])
-                class_stats[cls_name]["count"]   += 1
-                class_stats[cls_name]["conf_sum"] += cs
-                class_stats[cls_name]["img_names"].add(img_path.name)
-                total_det += 1
-
-        img = cv2.imread(str(img_path))
+        img  = cv2.imread(str(img_path))
         if dets is not None and len(dets) > 0:
             sv_dets = sv.Detections(
                 xyxy=np.array(dets.xyxy),
@@ -543,66 +602,65 @@ def _detect_rfdetr(run_dir: Path, images: list, detect_cfg: dict,
             img = box_annotator.annotate(scene=img, detections=sv_dets)
             img = label_annotator.annotate(scene=img, detections=sv_dets, labels=labels)
         cv2.imwrite(str(out_dir / img_path.name), img)
-
-    return _build_det_result(run_dir, "rfdetr", images, class_stats, total_det, out_dir)
-
-
-def _build_det_result(run_dir: Path, framework: str, images: list,
-                      class_stats: dict, total_det: int, out_dir: Path) -> dict:
-    meta             = _load_meta(run_dir)
-    images_with_det  = len({n for s in class_stats.values() for n in s["img_names"]})
-    top_class        = max(class_stats, key=lambda c: class_stats[c]["count"]) if class_stats else "-"
-    top_label        = f"{top_class}({class_stats[top_class]['count']})" if class_stats else "-"
-    return {
-        "run":             run_dir.name,
-        "framework":       framework,
-        "timestamp":       meta.get("timestamp", ""),
-        "total_det":       total_det,
-        "images_with_det": images_with_det,
-        "num_images":      len(images),
-        "top_class":       top_label,
-        "annotated_dir":   str(out_dir),
-    }
+    print(f"    → detect_test_rfdetr/ ({len(test_imgs)} images)")
 
 
-def phase_detect_all(runs_dir: Path, detect_cfg: dict,
-                     workspace_dir: Path, class_names: list) -> list:
-    banner("Phase 6 — Detection on image folder")
-    images_path = resolve(detect_cfg["images"])
-    images      = sorted(p for p in images_path.iterdir() if p.suffix.lower() in SUPPORTED_IMG)
-    if not images:
-        print(f"  No images found in {detect_cfg['images']} — skipping.")
+def phase_blind_test_all(runs_dir: Path, merged_dir: Path,
+                          merged_coco_dir: Path | None, val_cfg: dict,
+                          workspace_dir: Path, class_names: list) -> list:
+    banner("Phase 6 — Blind Test (held-out 10% of val)")
+
+    test_imgs_dir = merged_dir / "test" / "images"
+    if not test_imgs_dir.exists() or not any(
+        p.suffix.lower() in SUPPORTED_IMG for p in test_imgs_dir.iterdir()
+    ):
+        print("  No blind test images found — skipping.")
         return []
-    print(f"  Found {len(images)} images in {detect_cfg['images']}")
 
-    run_dirs    = sorted(d for d in runs_dir.iterdir() if d.is_dir())
-    det_results = []
+    test_imgs = sorted(
+        p for p in test_imgs_dir.iterdir() if p.suffix.lower() in SUPPORTED_IMG
+    )
+
+    run_dirs = sorted(d for d in runs_dir.iterdir() if d.is_dir())
+    results  = []
+    total    = len(run_dirs)
 
     for i, run_dir in enumerate(run_dirs, 1):
         has_yolo   = (run_dir / "weights" / "best.pt").exists()
         has_rfdetr = (run_dir / "rfdetr"  / "checkpoint_best_total.pth").exists()
 
         if has_yolo:
-            print(f"  [{i}/{len(run_dirs)}] {run_dir.name} [yolo] ...")
-            r = _detect_yolo(run_dir, images, detect_cfg)
+            print(f"  [{i}/{total}] {run_dir.name} [yolo] ...")
+            r = _eval_yolo(run_dir, merged_dir, val_cfg, split="test")
             if r:
-                det_results.append(r)
+                results.append(r)
 
-        if has_rfdetr:
-            print(f"  [{i}/{len(run_dirs)}] {run_dir.name} [rfdetr] ...")
-            r = _detect_rfdetr(run_dir, images, detect_cfg, class_names)
+        if has_rfdetr and merged_coco_dir:
+            print(f"  [{i}/{total}] {run_dir.name} [rfdetr] ...")
+            r = _eval_rfdetr(run_dir, merged_coco_dir, coco_split="test")
             if r:
-                det_results.append(r)
+                results.append(r)
 
-    hist_path = workspace_dir / "detection_history.csv"
-    _save_csv(
-        det_results,
-        hist_path,
-        ["run", "framework", "timestamp", "total_det",
-         "images_with_det", "num_images", "top_class", "annotated_dir"],
-    )
-    print(f"\n  Saved detection history → {hist_path}")
-    return det_results
+    # Save leaderboard before detection (results are durable even if detection fails)
+    results = update_blind_test_leaderboard(workspace_dir, results)
+    print(f"  Saved → {workspace_dir / 'blind_test_leaderboard.csv'}")
+
+    # Detection overlays on test images for every run
+    print(f"\n  Generating detection overlays on {len(test_imgs)} test images ...")
+    for i, run_dir in enumerate(run_dirs, 1):
+        print(f"  [{i}/{total}] {run_dir.name}")
+        if (run_dir / "weights" / "best.pt").exists():
+            _detect_test_yolo(run_dir, test_imgs, val_cfg)
+        if (run_dir / "rfdetr" / "checkpoint_best_total.pth").exists():
+            _detect_test_rfdetr(run_dir, test_imgs, val_cfg, class_names)
+
+    # One-time cleanup of old unlabeled detect folder (replaced by blind test)
+    data_images = ROOT / "data" / "images"
+    if data_images.exists():
+        shutil.rmtree(data_images)
+        print(f"  Cleaned up {data_images}")
+
+    return results
 
 
 # ─── Phase 7: Print ranked summary ───────────────────────────────
@@ -614,51 +672,32 @@ def _fmt_metric(val, best_val):
     return f"{val:>7.4f}{star}"
 
 
-def phase_summary(
-    eval_results: list,
-    det_results:  list,
-    current_run:  str | None,
-    batches:      list,
-    train_count:  int,
-    val_count:    int,
-    detect_cfg:   dict,
-    workspace_dir: Path,
-):
-    if not eval_results:
-        print("\nNo evaluation results to summarize.")
+def _print_ranked_table(results: list, current_run: str | None, label: str):
+    if not results:
         return
 
-    sorted_val = sorted(
-        eval_results,
+    sorted_results = sorted(
+        results,
         key=lambda r: r["mAP50"] if isinstance(r.get("mAP50"), float) else 0,
         reverse=True,
     )
-    best_row   = sorted_val[0]
-    MCOLS      = ["mAP50", "mAP50-95", "Precision", "Recall"]
-    best_vals  = {
-        m: max((r[m] for r in eval_results if isinstance(r.get(m), float)), default=None)
+    best_row  = sorted_results[0]
+    MCOLS     = ["mAP50", "mAP50-95", "Precision", "Recall"]
+    best_vals = {
+        m: max((r[m] for r in results if isinstance(r.get(m), float)), default=None)
         for m in MCOLS
     }
-
-    batch_label = "+".join(b.name for b in batches) if batches else "—"
-    banner(f"RETRAINING SUMMARY — {current_run or 'eval-only'}")
-    print(f"  Batches  : {batch_label}")
-    if batches:
-        print(f"  Dataset  : {train_count} train / {val_count} val images")
-    if "images" in detect_cfg and det_results:
-        print(f"  Test imgs: {detect_cfg['images']} ({det_results[0]['num_images']} images)")
-    print(f"  Leaderboard → {workspace_dir / 'leaderboard.csv'}")
 
     RUN_W = 34
     FRM_W = 6
 
-    print(f"\n--- VALIDATION (labeled val set) ---")
+    print(f"\n--- {label} ---")
     hdr = (f"{'Rank':<5}  {'Run':{RUN_W}}  {'Frm':{FRM_W}}  {'Batches':<18}  "
            f"{'mAP50':>8}  {'mAP50-95':>9}  {'Prec':>8}  {'Recall':>8}")
     print(hdr)
     print("-" * len(hdr))
 
-    for rank, r in enumerate(sorted_val, 1):
+    for rank, r in enumerate(sorted_results, 1):
         is_cur  = (r["run"] == current_run)
         is_best = (r["run"] == best_row["run"] and r["framework"] == best_row["framework"])
         star    = "★" if is_best else " "
@@ -673,33 +712,48 @@ def phase_summary(
             f"{_fmt_metric(r.get('Precision'),best_vals['Precision']):>8}  "
             f"{_fmt_metric(r.get('Recall'),   best_vals['Recall']):>8}"
         )
-
     print(f"\n  ★ = overall best   * = best value in column   [NEW] = this run")
+    return best_row
 
-    if det_results:
-        sorted_det   = sorted(det_results, key=lambda r: r["total_det"], reverse=True)
-        best_det_run = sorted_det[0]
-        print(f"\n--- DETECTION (image folder: {detect_cfg.get('images', '—')}) ---")
-        hdr2 = (f"{'Rank':<5}  {'Run':{RUN_W}}  {'Frm':{FRM_W}}  "
-                f"{'Total Det':>10}  {'Imgs w/ Det':>12}  {'Top Class'}")
-        print(hdr2)
-        print("-" * len(hdr2))
-        for rank, r in enumerate(sorted_det, 1):
-            is_best_d = (r["run"] == best_det_run["run"]
-                         and r["framework"] == best_det_run["framework"])
-            star2  = "★" if is_best_d else " "
-            suffix = " [NEW]" if r["run"] == current_run else ""
-            run_str = f"{star2} {r['run']}{suffix}"[:RUN_W]
-            frm_str = r.get("framework", "")[:FRM_W]
-            d_star  = "*" if is_best_d else " "
-            img_frac = f"{r['images_with_det']}/{r['num_images']}"
-            print(f"{rank:<5}  {run_str:{RUN_W}}  {frm_str:{FRM_W}}  "
-                  f"{r['total_det']:>9}{d_star}  {img_frac:>12}  {r['top_class']}")
-        print(f"\n  ★ = most detections   * = best total")
+
+def phase_summary(
+    eval_results:       list,
+    blind_test_results: list,
+    current_run:        str | None,
+    batches:            list,
+    train_count:        int,
+    val_count:          int,
+    test_count:         int,
+    workspace_dir:      Path,
+):
+    if not eval_results:
+        print("\nNo evaluation results to summarize.")
+        return
+
+    batch_label = "+".join(b.name for b in batches) if batches else "—"
+    banner(f"RETRAINING SUMMARY — {current_run or 'eval-only'}")
+    print(f"  Batches  : {batch_label}")
+    if batches:
+        print(f"  Dataset  : {train_count} train / {val_count} val / {test_count} test images")
+    print(f"  Val leaderboard  → {workspace_dir / 'leaderboard.csv'}")
+    if blind_test_results:
+        print(f"  Test leaderboard → {workspace_dir / 'blind_test_leaderboard.csv'}")
+
+    best_val = _print_ranked_table(
+        eval_results, current_run, "VALIDATION (labeled val set)"
+    )
+    best_bt = _print_ranked_table(
+        blind_test_results, current_run,
+        f"BLIND TEST (held-out 10% of val — {test_count} images)"
+    )
 
     print(f"\n{'='*62}")
-    print(f"  Best model  : {best_row['framework'].upper()}  mAP50={best_row['mAP50']}")
-    print(f"  Weights     : {best_row['weights']}")
+    if best_val:
+        print(f"  Best val model   : {best_val['framework'].upper()}  mAP50={best_val['mAP50']}")
+        print(f"  Val weights      : {best_val['weights']}")
+    if best_bt:
+        print(f"  Best blind test  : {best_bt['framework'].upper()}  mAP50={best_bt['mAP50']}")
+        print(f"  Test weights     : {best_bt['weights']}")
     print(f"{'='*62}\n")
 
 
@@ -717,7 +771,7 @@ def _save_csv(rows: list, path: Path, headers: list):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Iterative retraining: merge → train YOLO + RF-DETR → evaluate all → leaderboard"
+        description="Iterative retraining: merge → train YOLO + RF-DETR → evaluate → blind test"
     )
     parser.add_argument("--config",      required=True, help="Path to retrain config YAML")
     parser.add_argument("--eval-only",   action="store_true",
@@ -739,10 +793,9 @@ def main():
     runs_dir.mkdir(parents=True, exist_ok=True)
 
     expected_classes = cfg["classes"]
-    train_cfg   = cfg.get("train",        {})
-    rfdetr_cfg  = cfg.get("rfdetr_train", {})
-    val_cfg     = cfg.get("validate",     {})
-    detect_cfg  = cfg.get("detect",       {})
+    train_cfg  = cfg.get("train",        {})
+    rfdetr_cfg = cfg.get("rfdetr_train", {})
+    val_cfg    = cfg.get("validate",     {})
 
     run_rfdetr = (
         not args.eval_only
@@ -755,12 +808,14 @@ def main():
     batches = scan_batches(datasets_dir, expected_classes)
     print(f"  Found {len(batches)} batch(es): {[b.name for b in batches]}")
 
-    # Phase 2 — Merge YOLO dataset
-    banner("Phase 2 — Merging dataset (symlinks)")
-    merged_dir, train_count, val_count = merge_dataset(batches, workspace_dir, expected_classes)
-    print(f"  {train_count} train images, {val_count} val images → {merged_dir}")
+    # Phase 2 — Merge YOLO dataset (with 10% val → test split)
+    banner("Phase 2 — Merging dataset (symlinks, 10% val → test)")
+    merged_dir, train_count, val_count, test_count = merge_dataset(
+        batches, workspace_dir, expected_classes
+    )
+    print(f"  {train_count} train / {val_count} val / {test_count} test images → {merged_dir}")
 
-    # Phase 2b — Convert to COCO (for RF-DETR)
+    # Phase 2b — Convert to COCO (for RF-DETR, includes test split)
     merged_coco_dir = None
     if run_rfdetr or any(
         (d / "rfdetr" / "checkpoint_best_total.pth").exists()
@@ -775,7 +830,7 @@ def main():
     run_dir     = None
     if not args.eval_only:
         current_run, run_dir = phase_train_yolo(
-            train_cfg, merged_dir, batches, train_count, val_count, runs_dir
+            train_cfg, merged_dir, batches, train_count, val_count, test_count, runs_dir
         )
     else:
         banner("Phase 3 — Skipped (--eval-only)")
@@ -788,28 +843,26 @@ def main():
     elif args.skip_rfdetr or not rfdetr_cfg.get("enabled", True):
         banner("Phase 3b — Skipped (--skip-rfdetr / disabled in config)")
 
-    # Phase 4 — Evaluate all models
+    # Phase 4 — Evaluate all models (val set)
     eval_results = phase_evaluate_all(runs_dir, merged_dir, merged_coco_dir, val_cfg)
     if not eval_results:
         print("\n  No trained models found. Run without --eval-only first.")
         return
 
-    # Phase 5 — Leaderboard
-    banner("Phase 5 — Updating leaderboard")
+    # Phase 5 — Val leaderboard
+    banner("Phase 5 — Updating val leaderboard")
     eval_results = update_leaderboard(workspace_dir, eval_results)
     print(f"  Saved → {workspace_dir / 'leaderboard.csv'}")
 
-    # Phase 6 — Detect
-    det_results: list = []
-    if "images" in detect_cfg:
-        det_results = phase_detect_all(runs_dir, detect_cfg, workspace_dir, expected_classes)
-    else:
-        banner("Phase 6 — Skipped (no detect.images in config)")
+    # Phase 6 — Blind test
+    blind_test_results = phase_blind_test_all(
+        runs_dir, merged_dir, merged_coco_dir, val_cfg, workspace_dir, expected_classes
+    )
 
     # Phase 7 — Summary
     phase_summary(
-        eval_results, det_results, current_run,
-        batches, train_count, val_count, detect_cfg, workspace_dir,
+        eval_results, blind_test_results, current_run,
+        batches, train_count, val_count, test_count, workspace_dir,
     )
 
 

@@ -26,6 +26,7 @@ models/**/*.engine
 # Retrain pipeline I/O (auto-generated or user-dropped data)
 datasets/
 workspace*/
+data/
 
 # YOLO/MLflow run outputs at project root (auto-generated)
 runs/

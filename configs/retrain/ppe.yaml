@@ -19,7 +19,7 @@ workspace_dir: workspace_ppe      # auto-generated — do not edit by hand
 # RF-DETR training (runs after YOLO on the same GPU, same run folder)
 rfdetr_train:
   enabled: true
-  model: base          # base or large
+  model: small          # base or large
   epochs: 50
   batch_size: 4
   grad_accum_steps: 4

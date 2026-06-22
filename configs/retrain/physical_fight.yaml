@@ -4,18 +4,18 @@ classes:
   - fall
 
 # Paths (relative to project root)
-datasets_dir: datasets/physical_fight        # drop YOLO batch folders here
-workspace_dir: workspace_fight      # auto-generated — do not edit by hand
+datasets_dir: datasets/physical_fight # drop YOLO batch folders here
+workspace_dir: workspace_fight # auto-generated — do not edit by hand
 
 # RF-DETR training (runs after YOLO on the same GPU, same run folder)
 rfdetr_train:
   enabled: true
-  model: small          # base or large
+  model: nano # base or large
   epochs: 50
   batch_size: 4
   grad_accum_steps: 4
   lr: 0.0001
-  resolution: 560
+  resolution: 576
 
 # YOLO training hyperparameters
 train:

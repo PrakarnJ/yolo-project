@@ -48,6 +48,9 @@ def discover_models() -> dict:
             if rfdetr_w.exists():
                 label = f"{ws_key} | {run_dir.name} | RF-DETR"
                 registry[label] = {"framework": "rfdetr", "weights": str(rfdetr_w), "class_names": class_names}
+    for pose_w in sorted((ROOT / "models/raw_weight").glob("*pose*.pt")):
+        label = f"pose | {pose_w.stem} | YOLO-Pose"
+        registry[label] = {"framework": "yolo-pose", "weights": str(pose_w), "class_names": ["person"]}
     return registry
 
 
@@ -66,7 +69,7 @@ class ModelCache:
             return self._model
         entry = MODEL_REGISTRY[key]
         self._model = None  # release old
-        if entry["framework"] == "yolo":
+        if entry["framework"] in ("yolo", "yolo-pose"):
             self._model = YOLO(entry["weights"])
         else:
             warnings.filterwarnings("ignore", category=FutureWarning, module="rfdetr")
@@ -103,22 +106,32 @@ def format_detections(detections: list) -> str:
     if not detections:
         return "**No detections.**"
 
-    agg = defaultdict(list)
+    agg  = defaultdict(list)
+    kpts = defaultdict(list)
     for d in detections:
         agg[d["class"]].append(d["confidence"])
+        if "kpts_visible" in d:
+            kpts[d["class"]].append(d["kpts_visible"])
+
+    header = "| Class | Count | Max Conf | Avg Conf |"
+    sep    = "|-------|-------|----------|----------|"
+    if kpts:
+        header += " Avg Visible KPs |"
+        sep    += "-----------------|"
 
     rows = []
     for cls in sorted(agg):
         confs = agg[cls]
-        rows.append(
-            f"| {cls} | {len(confs)} | {max(confs):.2f} | {sum(confs)/len(confs):.2f} |"
-        )
+        row = f"| {cls} | {len(confs)} | {max(confs):.2f} | {sum(confs)/len(confs):.2f} |"
+        if kpts:
+            k = kpts.get(cls)
+            row += f" {sum(k)/len(k):.1f} |" if k else " – |"
+        rows.append(row)
 
     total_dets = len(detections)
     total_cls  = len(agg)
     return (
-        "| Class | Count | Max Conf | Avg Conf |\n"
-        "|-------|-------|----------|----------|\n"
+        header + "\n" + sep + "\n"
         + "\n".join(rows)
         + f"\n\n**Total: {total_dets} detection(s) across {total_cls} class(es)**"
     )
@@ -172,6 +185,17 @@ def infer_with_detections(frame_bgr: np.ndarray, model_key: str, conf: float):
              "confidence": float(b.conf)}
             for b in result.boxes
         ]
+        return result.plot(), det_list
+
+    if entry["framework"] == "yolo-pose":
+        result    = model(frame_bgr, conf=conf, verbose=False)[0]
+        kpt_confs = result.keypoints.conf if result.keypoints is not None else None
+        det_list  = []
+        for i, b in enumerate(result.boxes):
+            det = {"class": "person", "confidence": float(b.conf)}
+            if kpt_confs is not None:
+                det["kpts_visible"] = int((kpt_confs[i] > 0.5).sum())
+            det_list.append(det)
         return result.plot(), det_list
 
     return _annotate_rfdetr(model, frame_bgr, entry["class_names"], conf)
@@ -272,9 +296,41 @@ def handle_image(image_rgb, model_keys, conf, crop_mode, person_conf):
     return _pack_results(results)
 
 
+def _stitch_videos(results: list) -> str:
+    """Read the per-model output videos in lockstep and write one side-by-side
+    comparison video so all panels play in sync."""
+    import imageio
+
+    caps = [cv2.VideoCapture(path) for _, path, _ in results]
+    labels = [key.split(" | ", 1)[-1] for key, _, _ in results]
+    fps = caps[0].get(cv2.CAP_PROP_FPS) or 25
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    out_path = tmp.name
+    tmp.close()
+    writer = imageio.get_writer(out_path, fps=fps, codec="libx264",
+                                output_params=["-pix_fmt", "yuv420p"])
+    while True:
+        frames = []
+        for cap in caps:
+            ret, frame_bgr = cap.read()
+            if not ret:
+                frames = None
+                break
+            frames.append(frame_bgr)
+        if frames is None:
+            break
+        combined = stitch_comparison(list(zip(labels, frames)))
+        writer.append_data(combined[:, :, ::-1])
+    for cap in caps:
+        cap.release()
+    writer.close()
+    return out_path
+
+
 def handle_video(video_path, model_keys, conf, crop_mode, person_conf):
     if video_path is None or not model_keys:
-        return _empty_outputs()
+        return (*_empty_outputs(), gr.update(visible=False))
     import imageio
 
     results = []
@@ -298,7 +354,12 @@ def handle_video(video_path, model_keys, conf, crop_mode, person_conf):
         writer.close()
         results.append((key, out_path, format_detections(all_dets)))
 
-    return _pack_results(results)
+    if len(results) >= 2:
+        combined = gr.update(value=_stitch_videos(results), visible=True)
+    else:
+        combined = gr.update(visible=False)
+
+    return (*_pack_results(results), combined)
 
 
 def handle_stream(frame_rgb, model_keys, conf, crop_mode, person_conf):
@@ -325,6 +386,8 @@ def filter_models(category: str):
         choices = [k for k in MODEL_REGISTRY if k.endswith("| YOLO")]
     elif category == "RF-DETR":
         choices = [k for k in MODEL_REGISTRY if k.endswith("| RF-DETR")]
+    elif category == "Pose":
+        choices = [k for k in MODEL_REGISTRY if k.endswith("| YOLO-Pose")]
     else:
         choices = list(MODEL_REGISTRY.keys())
     return gr.Dropdown(choices=choices, value=[choices[0]] if choices else [])
@@ -364,7 +427,7 @@ with gr.Blocks(title="Detection UI") as demo:
     gr.Markdown("## Object Detection — YOLO & RF-DETR")
 
     with gr.Row():
-        fw_radio  = gr.Radio(["All", "YOLO", "RF-DETR"], value="All",
+        fw_radio  = gr.Radio(["All", "YOLO", "RF-DETR", "Pose"], value="All",
                              label="Framework", scale=1)
         model_dd  = gr.Dropdown(choices=model_choices,
                                 value=[model_choices[0]] if model_choices else [],
@@ -392,11 +455,13 @@ with gr.Blocks(title="Detection UI") as demo:
         with gr.Tab("Video"):
             vid_in      = gr.Video(label="Input Video")
             vid_run_btn = gr.Button("Run Inference")
+            vid_cmp     = gr.Video(label="Side-by-side comparison (synced)",
+                                   visible=False)
             vid_cols    = _make_output_columns("video")
             vid_run_btn.click(
                 fn=handle_video,
                 inputs=[vid_in] + shared_inputs,
-                outputs=_output_list(vid_cols),
+                outputs=_output_list(vid_cols) + [vid_cmp],
             )
 
         with gr.Tab("Camera"):

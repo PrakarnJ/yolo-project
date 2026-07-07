@@ -33,8 +33,24 @@ train:
   imgsz: 720
   batch: 16
   freeze: 10
+  optimizer: AdamW  # was 'auto', which silently ignored lr0 and picked its own AdamW lr (~0.000667); pin explicitly so lr0 actually applies.
+                    # NOTE: this makes lr0 take effect for the first time on this config; it is NOT a proven
+                    # performance win — run_007 (seed 0) and run_009 (seed 1) under this exact config landed at
+                    # occlusion mAP50 0.3939 and 0.1818 respectively, a bigger swing than any hyperparameter tested,
+                    # meaning that spread is seed noise, not a property of this config. No new run beat run_003's
+                    # combined val/blind/occlusion baseline (0.7703/0.7727/0.4545). Kept as a correctness fix,
+                    # not a proven champion — revert to 'auto' to reproduce run_003's exact recipe.
+  seed: 0
   lr0: 0.001
   patience: 20
+  translate: 0.1     # tried 0.25 (run_006): occlusion mAP50 crashed to 0.0 — reverted, clearly harmful
+  copy_paste: 0.3   # NO-OP on this dataset: ultralytics CopyPaste requires segmentation polygons in labels; all labels here are plain 5-col bboxes
+  mixup: 0.1         # tried 0.3 (run_008): val mAP50 dropped 0.7709->0.7365 and occlusion mAP50 dropped 0.3939->0.2424 — reverted, net negative
+  erasing: 0.5       # NO-OP for detection training: ultralytics only applies `erasing` in classification-task augmentation (RandomErasing), never in detect training
+  hsv_v: 0.5          # brightness/value jitter — robustness to lighting conditions (default 0.4)
+  degrees: 10          # rotation — robustness to camera mounting angle
+  perspective: 0.0005  # viewpoint distortion — different camera positions/heights
+  scale: 0.6           # object scale jitter — robustness to distance from camera (default 0.5)
 
 # Validation settings (applied to ALL models on each retrain)
 validate:

@@ -46,14 +46,15 @@ There is no test suite, linter, or build system — this is a scripts-and-config
 
 Three active scripts in `scripts/`; everything else flows from the two YAML configs.
 
-**`scripts/retrain.py`** — single-file, 7-phase pipeline:
+**`scripts/retrain.py`** — single-file, 8-phase pipeline:
 1. Scan `datasets/<domain>/` batch folders, verify class consistency across `dataset.yaml`s
 2. Merge all batches via symlinks into `<workspace>/merged/` with a 90/10 val/test split (recorded in `test_split_manifest.json`); also converts to COCO in `<workspace>/merged_coco/` for RF-DETR
 3. Train YOLO into `<workspace>/runs/run_NNN_<timestamp>/`, then RF-DETR into `<run_dir>/rfdetr/`
 4. Re-evaluate ALL past runs on the current val set (keeps rankings comparable)
 5. Update `<workspace>/leaderboard.csv`
 6. Blind test every model on the held-out test split → `blind_test_leaderboard.csv`
-7. Print ranked summary
+7. Blind test every model on each subfolder of `datasets/<domain>/custom_blind_test/` (auto-created with a `default/` starter subfolder, git-ignored). Any subfolder with an `images/` dir is treated as its own named test set — add as many as you want (e.g. `custom_blind_test/site_a/images/`, `custom_blind_test/site_b/images/`); `labels/` per subfolder is optional and enables YOLO mAP. Results for all test sets land in one `custom_blind_test_leaderboard.csv` (keyed by a `test_set` column) and print as separate ranked tables; a subfolder with no images is skipped
+8. Print ranked summary
 
 **`scripts/app.py`** — thin entry point for the Gradio debugging workbench, implemented in `scripts/workbench/`:
 - `registry.py` — `discover_models()` auto-scans `workspace_ppe/` and `workspace_fight/` for YOLO `best.pt` and RF-DETR `.pth` checkpoints, plus `*pose*.pt` in `models/raw_weight/` (`WORKSPACE_CONFIGS` maps workspace→config). Also: arbitrary weight loading (`register_custom_weight`, class names auto-read from YOLO checkpoints), run metadata (`get_run_info`), `ModelCache` (one GPU model at a time), `PersonDetector`.

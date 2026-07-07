@@ -115,6 +115,8 @@ def _eval_yolo_metrics(run_dir: Path, test_images_dir: Path, labels_dir: Path,
     dataset_yaml = tmp / "dataset.yaml"
     dataset_yaml.write_text(yaml.dump({
         "path":  str(tmp),
+        "train": "images",  # unused (split="test" below) but required by YOLO's schema check
+        "val":   "images",  # unused (split="test" below) but required by YOLO's schema check
         "test":  "images",
         "names": {i: n for i, n in enumerate(class_names)},
         "nc":    len(class_names),

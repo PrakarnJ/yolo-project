@@ -314,8 +314,21 @@ def phase_train_yolo(train_cfg: dict, merged_dir: Path, batches: list,
         batch=train_cfg.get("batch", 16),
         device=0,
         freeze=train_cfg.get("freeze", 0),
+        optimizer=train_cfg.get("optimizer", "auto"),
+        seed=train_cfg.get("seed", 0),
         lr0=train_cfg.get("lr0", 0.01),
         patience=train_cfg.get("patience", 50),
+        copy_paste=train_cfg.get("copy_paste", 0.0),
+        mixup=train_cfg.get("mixup", 0.0),
+        erasing=train_cfg.get("erasing", 0.4),
+        hsv_v=train_cfg.get("hsv_v", 0.4),
+        degrees=train_cfg.get("degrees", 0.0),
+        perspective=train_cfg.get("perspective", 0.0),
+        scale=train_cfg.get("scale", 0.5),
+        translate=train_cfg.get("translate", 0.1),
+        shear=train_cfg.get("shear", 0.0),
+        mosaic=train_cfg.get("mosaic", 1.0),
+        close_mosaic=train_cfg.get("close_mosaic", 10),
         project=str(runs_dir),
         name=run_name,
     )
@@ -663,6 +676,236 @@ def phase_blind_test_all(runs_dir: Path, merged_dir: Path,
     return results
 
 
+# ─── Phase 6b: Custom blind test (user-supplied folders) ─────────
+
+def ensure_custom_blind_test_dir(datasets_dir: Path) -> Path:
+    custom_dir = datasets_dir / "custom_blind_test"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    if not discover_custom_test_sets(custom_dir):
+        (custom_dir / "default" / "images").mkdir(parents=True, exist_ok=True)
+        (custom_dir / "default" / "labels").mkdir(parents=True, exist_ok=True)
+    return custom_dir
+
+
+def discover_custom_test_sets(custom_dir: Path) -> list:
+    if not custom_dir.exists():
+        return []
+    return sorted(
+        d for d in custom_dir.iterdir()
+        if d.is_dir() and (d / "images").is_dir()
+    )
+
+
+def _eval_yolo_custom(run_dir: Path, images_dir: Path, labels_dir: Path,
+                      class_names: list, val_cfg: dict, tmp_root: Path) -> dict | None:
+    from ultralytics import YOLO
+
+    weights = run_dir / "weights" / "best.pt"
+    if not weights.exists():
+        return None
+
+    tmp = tmp_root / run_dir.name
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    (tmp / "images").symlink_to(images_dir.resolve())
+    (tmp / "labels").symlink_to(labels_dir.resolve())
+
+    dataset_yaml = tmp / "dataset.yaml"
+    dataset_yaml.write_text(yaml.dump({
+        "path":  str(tmp),
+        "train": "images",  # unused (split="test" below) but required by YOLO's schema check
+        "val":   "images",  # unused (split="test" below) but required by YOLO's schema check
+        "test":  "images",
+        "names": {i: n for i, n in enumerate(class_names)},
+        "nc":    len(class_names),
+    }))
+
+    meta = _load_meta(run_dir)
+    try:
+        metrics = YOLO(str(weights)).val(
+            data=str(dataset_yaml),
+            split="test",
+            imgsz=val_cfg.get("imgsz", 640),
+            batch=val_cfg.get("batch", 16),
+            conf=val_cfg.get("conf", 0.5),
+            iou=val_cfg.get("iou", 0.5),
+            device=0,
+            plots=False,
+            save_json=False,
+            project=str(tmp),
+            name="eval",
+            verbose=False,
+        )
+        return {
+            "run":          run_dir.name,
+            "framework":    "yolo",
+            "timestamp":    meta.get("timestamp", ""),
+            "batches":      ",".join(meta.get("batches", [])),
+            "train_images": meta.get("train_images", ""),
+            "val_images":   meta.get("val_images", ""),
+            "test_images":  meta.get("test_images", ""),
+            "mAP50":        round(float(metrics.box.map50), 4),
+            "mAP50-95":     round(float(metrics.box.map),   4),
+            "Precision":    round(float(metrics.box.mp),    4),
+            "Recall":       round(float(metrics.box.mr),    4),
+            "weights":      str(weights),
+            "is_best":      False,
+        }
+    except Exception as e:
+        print(f"    [warn] YOLO eval failed: {e}")
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _detect_custom_yolo(run_dir: Path, test_imgs: list, val_cfg: dict, out_dir: Path):
+    from ultralytics import YOLO
+    weights = run_dir / "weights" / "best.pt"
+    if not weights.exists():
+        return
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+    model = YOLO(str(weights))
+    conf  = val_cfg.get("conf", 0.5)
+    imgsz = val_cfg.get("imgsz", 640)
+    for img_path in test_imgs:
+        result = model(str(img_path), conf=conf, imgsz=imgsz, verbose=False)[0]
+        result.save(str(out_dir / img_path.name))
+    print(f"      → {out_dir.name}/ ({len(test_imgs)} images)")
+
+
+def _detect_custom_rfdetr(run_dir: Path, test_imgs: list, val_cfg: dict, class_names: list, out_dir: Path):
+    import warnings
+    import cv2
+    import numpy as np
+    import supervision as sv
+    warnings.filterwarnings("ignore", category=FutureWarning, module="rfdetr")
+    from rfdetr import RFDETR
+
+    weights = run_dir / "rfdetr" / "checkpoint_best_total.pth"
+    if not weights.exists():
+        return
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+
+    model           = RFDETR.from_checkpoint(str(weights))
+    box_annotator   = sv.BoxAnnotator()
+    label_annotator = sv.LabelAnnotator()
+    conf            = val_cfg.get("conf", 0.5)
+
+    for img_path in test_imgs:
+        dets = model.predict(str(img_path), threshold=conf)
+        img  = cv2.imread(str(img_path))
+        if dets is not None and len(dets) > 0:
+            sv_dets = sv.Detections(
+                xyxy=np.array(dets.xyxy),
+                confidence=np.array(dets.confidence),
+                class_id=np.array(dets.class_id, dtype=int),
+            )
+            labels = [
+                f"{class_names[int(c)] if int(c) < len(class_names) else c} {s:.2f}"
+                for c, s in zip(dets.class_id, dets.confidence)
+            ]
+            img = box_annotator.annotate(scene=img, detections=sv_dets)
+            img = label_annotator.annotate(scene=img, detections=sv_dets, labels=labels)
+        cv2.imwrite(str(out_dir / img_path.name), img)
+    print(f"      → {out_dir.name}/ ({len(test_imgs)} images)")
+
+
+def _mark_best_per_group(results: list, group_key: str) -> list:
+    groups = {}
+    for r in results:
+        groups.setdefault(r[group_key], []).append(r)
+    for group_results in groups.values():
+        best = max(
+            (r for r in group_results if isinstance(r.get("mAP50"), float)),
+            key=lambda r: r["mAP50"],
+            default=None,
+        )
+        for r in group_results:
+            r["is_best"] = bool(
+                best and r["run"] == best["run"] and r["framework"] == best["framework"]
+            )
+    return results
+
+
+def update_custom_blind_test_leaderboard(workspace_dir: Path, results: list) -> list:
+    headers = [
+        "test_set", "run", "framework", "timestamp", "batches", "train_images", "val_images", "test_images",
+        "mAP50", "mAP50-95", "Precision", "Recall", "weights", "is_best",
+    ]
+    results = _mark_best_per_group(results, "test_set")
+    _save_csv(results, workspace_dir / "custom_blind_test_leaderboard.csv", headers)
+    return results
+
+
+def phase_custom_blind_test(runs_dir: Path, datasets_dir: Path, val_cfg: dict,
+                            workspace_dir: Path, class_names: list,
+                            current_run: str | None = None) -> list:
+    banner("Phase 6b — Custom Blind Test (user-supplied folders)")
+
+    custom_dir = ensure_custom_blind_test_dir(datasets_dir)
+    test_sets  = discover_custom_test_sets(custom_dir)
+    if not test_sets:
+        print(f"  No test-set folders in {custom_dir} — skipping.")
+        return []
+
+    run_dirs     = sorted(d for d in runs_dir.iterdir() if d.is_dir())
+    total        = len(run_dirs)
+    all_results  = []
+    tmp_root     = workspace_dir / ".tmp_custom_blind_test"
+
+    for test_set_dir in test_sets:
+        test_set_name = test_set_dir.name
+        images_dir    = test_set_dir / "images"
+        labels_dir    = test_set_dir / "labels"
+
+        print(f"\n  [{test_set_name}]")
+        test_imgs = sorted(p for p in images_dir.iterdir() if p.suffix.lower() in SUPPORTED_IMG)
+        if not test_imgs:
+            print(f"    No images in {images_dir} — skipping.")
+            continue
+
+        has_labels = labels_dir.is_dir() and any(labels_dir.iterdir())
+        set_results = []
+
+        if has_labels:
+            for i, run_dir in enumerate(run_dirs, 1):
+                if (run_dir / "weights" / "best.pt").exists():
+                    print(f"    [{i}/{total}] {run_dir.name} [yolo] ...")
+                    r = _eval_yolo_custom(run_dir, images_dir, labels_dir, class_names, val_cfg,
+                                          tmp_root / test_set_name)
+                    if r:
+                        r["test_set"] = test_set_name
+                        set_results.append(r)
+            all_results.extend(set_results)
+        else:
+            print(f"    No labels in {labels_dir} — skipping metrics (visual overlays only).")
+
+        print(f"    Generating detection overlays on {len(test_imgs)} images ...")
+        for i, run_dir in enumerate(run_dirs, 1):
+            print(f"    [{i}/{total}] {run_dir.name}")
+            base_out = run_dir / "detect_custom_blind_test" / test_set_name
+            if (run_dir / "weights" / "best.pt").exists():
+                _detect_custom_yolo(run_dir, test_imgs, val_cfg, base_out / "yolo")
+            if (run_dir / "rfdetr" / "checkpoint_best_total.pth").exists():
+                _detect_custom_rfdetr(run_dir, test_imgs, val_cfg, class_names, base_out / "rfdetr")
+
+        if set_results:
+            _print_ranked_table(set_results, current_run, f"Custom Blind Test — {test_set_name}")
+
+    shutil.rmtree(tmp_root, ignore_errors=True)
+
+    if all_results:
+        all_results = update_custom_blind_test_leaderboard(workspace_dir, all_results)
+        print(f"\n  Saved → {workspace_dir / 'custom_blind_test_leaderboard.csv'}")
+
+    return all_results
+
+
 # ─── Phase 7: Print ranked summary ───────────────────────────────
 
 def _fmt_metric(val, best_val):
@@ -857,6 +1100,11 @@ def main():
     # Phase 6 — Blind test
     blind_test_results = phase_blind_test_all(
         runs_dir, merged_dir, merged_coco_dir, val_cfg, workspace_dir, expected_classes
+    )
+
+    # Phase 6b — Custom blind test (user-supplied folders)
+    phase_custom_blind_test(
+        runs_dir, datasets_dir, val_cfg, workspace_dir, expected_classes, current_run
     )
 
     # Phase 7 — Summary
